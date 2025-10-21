@@ -1,23 +1,19 @@
 /*
  * Tai-e: A Static Analysis Framework for Java
  *
- * Copyright (C) 2022 Tian Tan <tiantan@nju.edu.cn>
- * Copyright (C) 2022 Yue Li <yueli@nju.edu.cn>
+ * Copyright (C) 2022 Tian Tan <tiantan@nju.edu.cn> Copyright (C) 2022 Yue Li <yueli@nju.edu.cn>
  *
  * This file is part of Tai-e.
  *
- * Tai-e is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License
- * as published by the Free Software Foundation, either version 3
- * of the License, or (at your option) any later version.
+ * Tai-e is free software: you can redistribute it and/or modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later
+ * version.
  *
- * Tai-e is distributed in the hope that it will be useful,but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
- * or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General
- * Public License for more details.
+ * Tai-e is distributed in the hope that it will be useful,but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with Tai-e. If not, see <https://www.gnu.org/licenses/>.
+ * You should have received a copy of the GNU Lesser General Public License along with Tai-e. If not, see
+ * <https://www.gnu.org/licenses/>.
  */
 
 package pascal.taie.analysis.dataflow.solver;
@@ -27,8 +23,7 @@ import pascal.taie.analysis.dataflow.fact.DataflowResult;
 import pascal.taie.analysis.graph.cfg.CFG;
 
 /**
- * Base class for data-flow analysis solver, which provides common
- * functionalities for different solver implementations.
+ * Base class for data-flow analysis solver, which provides common functionalities for different solver implementations.
  *
  * @param <Node> type of CFG nodes
  * @param <Fact> type of data-flow facts
@@ -44,8 +39,7 @@ public abstract class Solver<Node, Fact> {
     /**
      * Static factory method to create a new solver for given analysis.
      */
-    public static <Node, Fact> Solver<Node, Fact> makeSolver(
-            DataflowAnalysis<Node, Fact> analysis) {
+    public static <Node, Fact> Solver<Node, Fact> makeSolver(DataflowAnalysis<Node, Fact> analysis) {
         return new IterativeSolver<>(analysis);
     }
 
@@ -82,6 +76,21 @@ public abstract class Solver<Node, Fact> {
 
     protected void initializeBackward(CFG<Node> cfg, DataflowResult<Node, Fact> result) {
         // TODO - finish me
+
+        /// memory allocation
+        for(Node node :cfg){
+            result.setOutFact(node, analysis.newInitialFact());
+        }
+
+        result.setInFact(cfg.getExit(), analysis.newBoundaryFact(cfg));
+
+        for (Node node : cfg) {
+            if (cfg.isExit(node)) {
+                continue;
+            }
+
+            result.setInFact(node, analysis.newInitialFact());
+        }
     }
 
     /**
