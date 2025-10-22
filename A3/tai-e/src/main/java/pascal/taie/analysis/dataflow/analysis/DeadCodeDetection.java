@@ -33,21 +33,15 @@ import pascal.taie.analysis.graph.cfg.CFGBuilder;
 import pascal.taie.analysis.graph.cfg.Edge;
 import pascal.taie.config.AnalysisConfig;
 import pascal.taie.ir.IR;
-import pascal.taie.ir.exp.ArithmeticExp;
-import pascal.taie.ir.exp.ArrayAccess;
-import pascal.taie.ir.exp.CastExp;
-import pascal.taie.ir.exp.FieldAccess;
-import pascal.taie.ir.exp.NewExp;
-import pascal.taie.ir.exp.RValue;
-import pascal.taie.ir.exp.Var;
-import pascal.taie.ir.stmt.AssignStmt;
-import pascal.taie.ir.stmt.If;
-import pascal.taie.ir.stmt.Stmt;
-import pascal.taie.ir.stmt.SwitchStmt;
+import pascal.taie.ir.exp.*;
+import pascal.taie.ir.stmt.*;
 
 import java.util.Comparator;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.Vector;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
 public class DeadCodeDetection extends MethodAnalysis {
 
@@ -70,8 +64,132 @@ public class DeadCodeDetection extends MethodAnalysis {
         // keep statements (dead code) sorted in the resulting set
         Set<Stmt> deadCode = new TreeSet<>(Comparator.comparing(Stmt::getIndex));
         // TODO - finish me
+
+        Vector<Stmt> deque = new Vector<>();
+        Set<Stmt> useful = new TreeSet<>(Comparator.comparing(Stmt::getIndex));
+        deque.add(cfg.getEntry());
+
+        Consumer<Stmt> addDeque = (Stmt stmt) -> {
+            if (!useful.contains(stmt)) {
+                ((Vector<Stmt>) deque).add(stmt);
+            }
+        };
+
+        Consumer<Set<Stmt>> addAllDeque = (Set<Stmt> stmts) -> {
+            for (Stmt stmt : stmts) {
+                if (!useful.contains(stmt)) {
+                    ((Vector<Stmt>) deque).add(stmt);
+                }
+            }
+        };
+
+        while (!deque.isEmpty()) {
+            Stmt stmt = deque.remove(0);
+
+            if (stmt instanceof If if_stmt) {
+                // assume if_stmt is usefully even if with constant cond
+                useful.add(stmt);
+                /// branch unreachable
+
+                ConditionExp cond = if_stmt.getCondition();
+                Value cond_value = evaluateCondExpr(cond, constants.getInFact(if_stmt));
+
+                if (cond_value.isNAC()) {
+                    addAllDeque.accept(cfg.getSuccsOf(stmt));
+                } else {
+                    for (Edge<Stmt> edge : cfg.getOutEdgesOf(stmt)) {
+                        if (cond_value.getConstant() == 0 && edge.getKind() == Edge.Kind.IF_FALSE
+                                || cond_value.getConstant() == 1 && edge.getKind() == Edge.Kind.IF_TRUE) {
+                            addDeque.accept(edge.getTarget());
+                        }
+                    }
+                }
+            } else if (stmt instanceof SwitchStmt switch_stmt) {
+                /// branch unreachable
+
+                useful.add(stmt);
+
+                Var cond = switch_stmt.getVar();
+                Value cond_value = constants.getInFact(switch_stmt).get(cond);
+
+                if (cond_value.isConstant()) {
+                    for (Edge<Stmt> edge : cfg.getOutEdgesOf(stmt)) {
+                        if (edge.getKind() == Edge.Kind.SWITCH_CASE && edge.getCaseValue() == cond_value.getConstant()) {
+                            addDeque.accept(edge.getTarget());
+                            break;
+                        } else if(edge.getKind() == Edge.Kind.SWITCH_DEFAULT) {
+                            // assume this is the last edge to be iterated
+                            // Edge.Kind.SWITCH_CASE
+                            addDeque.accept(edge.getTarget());
+                        }
+                    }
+                } else {
+                    addAllDeque.accept(cfg.getSuccsOf(stmt));
+                }
+            } else if (stmt instanceof AssignStmt<?, ?> assign_stmt) {
+                // check if side effect
+                boolean sideEffect = false;
+                for (RValue rvalue : assign_stmt.getUses()) {
+                    sideEffect |= !hasNoSideEffect(rvalue);
+                }
+                if (sideEffect) {
+                    useful.add(assign_stmt);
+                    addAllDeque.accept(cfg.getSuccsOf(stmt));
+                    continue;
+                }
+
+                // the def of assignment won't be empty
+                if (liveVars.getOutFact(assign_stmt).contains((Var) assign_stmt.getDef().get())) {
+                    useful.add(assign_stmt);
+                }
+                addAllDeque.accept(cfg.getSuccsOf(stmt));
+
+            } else if (stmt instanceof Return) {
+                useful.add(stmt);
+            } else {
+                useful.add(stmt);
+                addAllDeque.accept(cfg.getSuccsOf(stmt));
+            }
+        }
+
+        useful.add(cfg.getExit());
+
+        /// control unreachable
+        for (Stmt stmt : cfg) {
+            if (!useful.contains(stmt)) {
+                deadCode.add(stmt);
+            }
+        }
+
         // Your task is to recognize dead code in ir and add it to deadCode
         return deadCode;
+    }
+
+    /**
+     * @return Value after evaluate a CondExpr
+     */
+    private static Value evaluateCondExpr(ConditionExp cond, CPFact in) {
+        ConditionExp.Op op = cond.getOperator();
+
+        Value rhs = in.get(cond.getOperand1());
+        Value lhs = in.get(cond.getOperand2());
+
+        boolean res = false;
+        if (rhs.isConstant() || lhs.isConstant()) {
+            switch (op) {
+                case EQ -> res = rhs.getConstant() == lhs.getConstant();
+                case NE -> res = rhs.getConstant() != lhs.getConstant();
+                case LT -> res = rhs.getConstant() < lhs.getConstant();
+                case GT -> res = rhs.getConstant() > lhs.getConstant();
+                case LE -> res = rhs.getConstant() <= lhs.getConstant();
+                case GE -> res = rhs.getConstant() >= lhs.getConstant();
+            }
+
+            return Value.makeConstant(res ? 1 : 0);
+        }
+
+        /// never mind is NAC or UNDEF
+        return Value.getNAC();
     }
 
     /**

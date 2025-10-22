@@ -26,19 +26,20 @@ import pascal.taie.analysis.dataflow.analysis.AbstractDataflowAnalysis;
 import pascal.taie.analysis.graph.cfg.CFG;
 import pascal.taie.config.AnalysisConfig;
 import pascal.taie.ir.IR;
-import pascal.taie.ir.exp.ArithmeticExp;
-import pascal.taie.ir.exp.BinaryExp;
-import pascal.taie.ir.exp.BitwiseExp;
-import pascal.taie.ir.exp.ConditionExp;
-import pascal.taie.ir.exp.Exp;
-import pascal.taie.ir.exp.IntLiteral;
-import pascal.taie.ir.exp.ShiftExp;
-import pascal.taie.ir.exp.Var;
+import pascal.taie.ir.exp.*;
 import pascal.taie.ir.stmt.DefinitionStmt;
 import pascal.taie.ir.stmt.Stmt;
 import pascal.taie.language.type.PrimitiveType;
 import pascal.taie.language.type.Type;
 import pascal.taie.util.AnalysisException;
+
+import static pascal.taie.ir.exp.ArithmeticExp.Op.*;
+import static pascal.taie.ir.exp.ArithmeticExp.Op.DIV;
+import static pascal.taie.ir.exp.ArithmeticExp.Op.REM;
+import static pascal.taie.ir.exp.BitwiseExp.Op.*;
+import static pascal.taie.ir.exp.ConditionExp.Op.*;
+import static pascal.taie.ir.exp.ConditionExp.Op.GE;
+import static pascal.taie.ir.exp.ShiftExp.Op.*;
 
 public class ConstantPropagation extends
         AbstractDataflowAnalysis<Stmt, CPFact> {
@@ -57,18 +58,25 @@ public class ConstantPropagation extends
     @Override
     public CPFact newBoundaryFact(CFG<Stmt> cfg) {
         // TODO - finish me
-        return null;
+        CPFact fact = new CPFact();
+        for (Var var : cfg.getIR().getParams()) {
+            fact.update(var, Value.getNAC());
+        }
+        return fact;
     }
 
     @Override
     public CPFact newInitialFact() {
         // TODO - finish me
-        return null;
+        return new CPFact();
     }
 
     @Override
     public void meetInto(CPFact fact, CPFact target) {
         // TODO - finish me
+        for (Var var : fact.keySet()) {
+            target.update(var, meetValue(fact.get(var), target.get(var)));
+        }
     }
 
     /**
@@ -76,13 +84,38 @@ public class ConstantPropagation extends
      */
     public Value meetValue(Value v1, Value v2) {
         // TODO - finish me
-        return null;
+        if (v1.isNAC() || v2.isNAC()) {
+            return Value.getNAC();
+        } else if (v1.isUndef() || v2.isUndef()) {
+            return v1.isUndef() ? v2 : v1;
+        } else if (v1.isConstant() && v2.isConstant()) {
+            if (v1.equals(v2)) {
+                return v1;
+            } else {
+                return Value.getNAC();
+            }
+        } else {
+            throw new AnalysisException("meetValue: can't match");
+        }
     }
 
     @Override
     public boolean transferNode(Stmt stmt, CPFact in, CPFact out) {
         // TODO - finish me
-        return false;
+        CPFact old_out = out.copy();
+
+        out.copyFrom(in);
+
+        /// canHoldInt
+        stmt.getDef().ifPresent(lValue -> out.remove((Var) lValue));
+
+        for (RValue rvalue : stmt.getUses()) {
+            stmt.getDef().ifPresent(lValue ->
+                    out.update((Var) lValue, evaluate(rvalue, in))
+            );
+        }
+
+        return !out.equals(old_out);
     }
 
     /**
@@ -112,6 +145,87 @@ public class ConstantPropagation extends
      */
     public static Value evaluate(Exp exp, CPFact in) {
         // TODO - finish me
-        return null;
+        if (exp instanceof Var) {
+            return in.get((Var) exp);
+        } else if (exp instanceof IntLiteral) {
+            return Value.makeConstant(((IntLiteral) exp).getValue());
+        } else if (exp instanceof BinaryExp binary) {
+            ///  thanks to ir
+            Value lhs = in.get(binary.getOperand1());
+            Value rhs = in.get(binary.getOperand2());
+
+            if (lhs.isUndef() || rhs.isUndef()) {
+                return Value.getUndef();
+            } else if (lhs.isNAC() || rhs.isNAC()) {
+                return Value.getNAC();
+            }
+
+            BinaryExp.Op op = binary.getOperator();
+
+            int left = lhs.getConstant();
+            int right = rhs.getConstant();
+
+            int result = 0;
+            if (op == ADD) {
+                result = left + right;
+            } else if (op == SUB) {
+                result = left - right;
+            } else if (op == MUL) {
+                result = left * right;
+            } else if (op == DIV) {
+                if (right == 0) {
+                    return Value.getUndef();
+                }
+                result = left / right;
+            } else if (op == REM) {
+                if (right == 0) {
+                    return Value.getUndef();
+                }
+                result = left % right;
+            } else if (op == OR) {
+                result = left | right;
+            } else if (op == AND) {
+                result = left & right;
+            } else if (op == XOR) {
+                result = left ^ right;
+            } else if (op == EQ) {
+                if (left == right) {
+                    result = 1;
+                }
+            } else if (op == NE) {
+                if (left != right) {
+                    result = 1;
+                }
+            } else if (op == LT) {
+                if (left < right) {
+                    result = 1;
+                }
+            } else if (op == GT) {
+                if (left > right) {
+                    result = 1;
+                }
+            } else if (op == LE) {
+                if (left <= right) {
+                    result = 1;
+                }
+            } else if (op == GE) {
+                if (left >= right) {
+                    result = 1;
+                }
+            } else if (op == SHL) {
+                result = left << right;
+            } else if (op == SHR) {
+                result = left >> right;
+            } else if (op == USHR) {
+                result = left >>> right;
+            } else {
+                throw new IllegalArgumentException("Unknown op: " + op);
+            }
+
+            return Value.makeConstant(result);
+        } else {
+            ///  InvokeVirtual
+            return Value.getNAC();
+        }
     }
 }
