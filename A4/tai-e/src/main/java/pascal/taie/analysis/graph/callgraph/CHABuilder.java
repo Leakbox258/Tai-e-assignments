@@ -25,14 +25,12 @@ package pascal.taie.analysis.graph.callgraph;
 import pascal.taie.World;
 import pascal.taie.ir.proginfo.MethodRef;
 import pascal.taie.ir.stmt.Invoke;
-import pascal.taie.language.classes.ClassHierarchy;
-import pascal.taie.language.classes.JClass;
-import pascal.taie.language.classes.JMethod;
-import pascal.taie.language.classes.Subsignature;
+import pascal.taie.language.classes.*;
+import pascal.taie.util.AnalysisException;
 
-import java.util.ArrayDeque;
-import java.util.Queue;
-import java.util.Set;
+import javax.annotation.Nullable;
+import java.lang.invoke.CallSite;
+import java.util.*;
 
 /**
  * Implementation of the CHA algorithm.
@@ -47,10 +45,49 @@ class CHABuilder implements CGBuilder<Invoke, JMethod> {
         return buildCallGraph(World.get().getMainMethod());
     }
 
+    private CallKind getCallKind(Invoke cs) {
+        if (cs.isSpecial()) {
+            return CallKind.SPECIAL;
+        } else if (cs.isStatic()) {
+            return CallKind.STATIC;
+        } else if (cs.isInterface()) {
+            return CallKind.INTERFACE;
+        } else if (cs.isVirtual()) {
+            return CallKind.VIRTUAL;
+        } else if (cs.isDynamic()) {
+            return CallKind.DYNAMIC;
+        } else {
+            return CallKind.OTHER;
+        }
+    }
+
     private CallGraph<Invoke, JMethod> buildCallGraph(JMethod entry) {
         DefaultCallGraph callGraph = new DefaultCallGraph();
         callGraph.addEntryMethod(entry);
         // TODO - finish me
+        Vector<JMethod> worklist = new Vector<>();
+        worklist.add(entry);
+
+        while (!worklist.isEmpty()) {
+            JMethod method = worklist.remove(0);
+
+            if (callGraph.contains(method)) {
+                continue;
+            }
+
+            callGraph.addReachableMethod(method);
+            for (Invoke cs : callGraph.getCallSitesIn(method)) {
+                Set<JMethod> T = resolve(cs);
+                for (JMethod m : T) {
+                    Edge<Invoke, JMethod> edge = new Edge<>(getCallKind(cs), cs, m);
+                    callGraph.addEdge(edge);
+                    if (!callGraph.contains(m)) {
+                        worklist.add(m);
+                    }
+                }
+            }
+        }
+
         return callGraph;
     }
 
@@ -59,7 +96,34 @@ class CHABuilder implements CGBuilder<Invoke, JMethod> {
      */
     private Set<JMethod> resolve(Invoke callSite) {
         // TODO - finish me
-        return null;
+
+        Set<JMethod> T = new LinkedHashSet<>();
+
+        Subsignature sig = callSite.getMethodRef().getSubsignature();
+
+        if (callSite.isVirtual() || callSite.isInterface()) {
+            Vector<JClass> deque = new Vector<>();
+            deque.add(callSite.getMethodRef().getDeclaringClass());
+
+            while (!deque.isEmpty()) {
+                JClass jclass = deque.remove(0);
+
+                T.add(dispatch(jclass, sig)); // maybe null
+
+                if (jclass.isInterface()) {
+                    deque.addAll(hierarchy.getDirectSubinterfacesOf(jclass));
+                    deque.addAll(hierarchy.getDirectImplementorsOf(jclass));
+                } else {
+                    deque.addAll(hierarchy.getDirectSubclassesOf(jclass));
+                }
+            }
+        } else {
+            T.add(dispatch(callSite.getMethodRef().getDeclaringClass(), sig));
+        }
+
+        T.remove(null);
+
+        return T;
     }
 
     /**
@@ -68,8 +132,23 @@ class CHABuilder implements CGBuilder<Invoke, JMethod> {
      * @return the dispatched target method, or null if no satisfying method
      * can be found.
      */
+    @Nullable
     private JMethod dispatch(JClass jclass, Subsignature subsignature) {
         // TODO - finish me
-        return null;
+
+        JClass superClass = jclass;
+        JMethod dispatchMethod = null;
+
+        while (superClass != null) {
+            dispatchMethod = superClass.getDeclaredMethod(subsignature);
+
+            if (dispatchMethod != null && !dispatchMethod.isAbstract()) {
+                break;
+            }
+
+            superClass = superClass.getSuperClass();
+        }
+
+        return dispatchMethod;
     }
 }
