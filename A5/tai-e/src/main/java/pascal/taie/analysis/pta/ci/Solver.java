@@ -31,20 +31,11 @@ import pascal.taie.analysis.graph.callgraph.DefaultCallGraph;
 import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.pta.core.heap.HeapModel;
 import pascal.taie.analysis.pta.core.heap.Obj;
-import pascal.taie.ir.exp.InvokeExp;
 import pascal.taie.ir.exp.Var;
-import pascal.taie.ir.proginfo.MethodRef;
-import pascal.taie.ir.stmt.Copy;
-import pascal.taie.ir.stmt.Invoke;
-import pascal.taie.ir.stmt.LoadArray;
-import pascal.taie.ir.stmt.LoadField;
-import pascal.taie.ir.stmt.New;
-import pascal.taie.ir.stmt.StmtVisitor;
-import pascal.taie.ir.stmt.StoreArray;
-import pascal.taie.ir.stmt.StoreField;
+import pascal.taie.ir.stmt.*;
 import pascal.taie.language.classes.ClassHierarchy;
+import pascal.taie.language.classes.JField;
 import pascal.taie.language.classes.JMethod;
-import pascal.taie.util.AnalysisException;
 import pascal.taie.language.type.Type;
 
 import java.util.List;
@@ -97,6 +88,14 @@ class Solver {
      */
     private void addReachable(JMethod method) {
         // TODO - finish me
+
+        if (!callGraph.contains(method)) {
+            boolean isNew = callGraph.addReachableMethod(method);
+
+            method.getIR().forEach(stmt -> {
+                stmt.accept(stmtProcessor);
+            });
+        }
     }
 
     /**
@@ -105,6 +104,107 @@ class Solver {
     private class StmtProcessor implements StmtVisitor<Void> {
         // TODO - if you choose to implement addReachable()
         //  via visitor pattern, then finish me
+        public Void visit(New stmt) {
+            /// x = new T()
+            Obj obj = heapModel.getObj(stmt);
+            VarPtr varptr = pointerFlowGraph.getVarPtr(stmt.getLValue());
+
+            workList.addEntry(varptr, new PointsToSet(obj));
+            return null;
+        }
+
+        public Void visit(Copy stmt) {
+            ///  y = x
+            Pointer source = pointerFlowGraph.getVarPtr(stmt.getRValue());
+            Pointer target = pointerFlowGraph.getVarPtr(stmt.getLValue());
+            addPFGEdge(source, target);
+            return null;
+        }
+
+        public Void visit(LoadField stmt) {
+            /// x = y.field
+            Var lvar = stmt.getLValue();
+
+            VarPtr lvarptr = pointerFlowGraph.getVarPtr(lvar);
+
+            JField field = stmt.getFieldRef().resolve();
+            boolean isStatic = stmt.isStatic();
+            if (isStatic) {
+                StaticField stField = pointerFlowGraph.getStaticField(field);
+                addPFGEdge(stField, lvarptr);
+            }
+            return null;
+        }
+
+        public Void visit(StoreField stmt) {
+            /// y.field = x
+            Var rvar = stmt.getRValue();
+
+            VarPtr rvarptr = pointerFlowGraph.getVarPtr(rvar);
+
+            JField field = stmt.getFieldRef().resolve();
+            boolean isStatic = stmt.isStatic();
+            if (isStatic) {
+                StaticField stField = pointerFlowGraph.getStaticField(field);
+                addPFGEdge(rvarptr, stField);
+            }
+            return null;
+        }
+
+        public Void visit(Invoke stmt) {
+            if (!stmt.isStatic()) {
+                return null;
+            }
+            ///  static invoke
+            JMethod method = stmt.getMethodRef().resolve();
+
+            Edge<Invoke, JMethod> edge = new Edge<>(getCallKind(stmt), stmt, method);
+            if (callGraph.addEdge(edge)) {
+                addReachable(method);
+                for (int idx = 0; idx < method.getParamCount(); ++idx) {
+                    Pointer source = pointerFlowGraph.getVarPtr(stmt.getInvokeExp().getArg(idx));
+                    Pointer target = pointerFlowGraph.getVarPtr(method.getIR().getVar(idx));
+                    addPFGEdge(source, target);
+                }
+
+                /// todo...
+                List<Var> methodRets = method.getIR().getReturnVars();
+                if (!methodRets.isEmpty()) {
+                    Var ret = stmt.getLValue();
+                    addPFGEdge(pointerFlowGraph.getVarPtr(methodRets.get(0)), pointerFlowGraph.getVarPtr(ret));
+                }
+            }
+
+            return null;
+        }
+
+        public Void visit(Return stmt) {
+            /// $temp = return x
+            Var rvar = stmt.getValue();
+
+            if (rvar == null) {
+                return null;
+            }
+
+            JMethod currentMethod = rvar.getMethod();
+
+            if (currentMethod.getIR().getReturnVars().isEmpty()) {
+                return null;
+            }
+
+            Var methodRet = currentMethod.getIR().getReturnVars().get(0);
+
+            if(rvar == methodRet){
+                return null;
+            }
+
+            /// circle call between methods
+            Pointer source = pointerFlowGraph.getVarPtr(rvar);
+            Pointer target = pointerFlowGraph.getVarPtr(methodRet);
+            addPFGEdge(source, target);
+
+            return null;
+        }
     }
 
     /**
@@ -112,6 +212,12 @@ class Solver {
      */
     private void addPFGEdge(Pointer source, Pointer target) {
         // TODO - finish me
+
+        if (pointerFlowGraph.addEdge(source, target)) {
+            if (!source.getPointsToSet().isEmpty()) {
+                workList.addEntry(target, source.getPointsToSet());
+            }
+        }
     }
 
     /**
@@ -119,25 +225,101 @@ class Solver {
      */
     private void analyze() {
         // TODO - finish me
+
+        while (!workList.isEmpty()) {
+            WorkList.Entry entry = workList.pollEntry();
+            Pointer n = entry.pointer();
+            PointsToSet pts = entry.pointsToSet();
+
+            PointsToSet diff = propagate(n, pts);
+
+            if (n instanceof VarPtr varptr) {
+                Var var = varptr.getVar();
+
+                for (Obj o : diff) {
+                    for (StoreField stmt : var.getStoreFields()) {
+                        JField field = stmt.getFieldRef().resolve();
+                        VarPtr rvarptr = pointerFlowGraph.getVarPtr(stmt.getRValue());
+
+                        addPFGEdge(rvarptr, pointerFlowGraph.getInstanceField(o, field));
+                    }
+                    for (LoadField stmt : var.getLoadFields()) {
+                        JField field = stmt.getFieldRef().resolve();
+                        VarPtr lvarptr = pointerFlowGraph.getVarPtr(stmt.getLValue());
+
+                        addPFGEdge(pointerFlowGraph.getInstanceField(o, field), lvarptr);
+                    }
+                    for (StoreArray stmt : var.getStoreArrays()) {
+                        VarPtr rvarptr = pointerFlowGraph.getVarPtr(stmt.getRValue());
+
+                        addPFGEdge(rvarptr, pointerFlowGraph.getArrayIndex(o));
+                    }
+                    for (LoadArray stmt : var.getLoadArrays()) {
+                        VarPtr lvarptr = pointerFlowGraph.getVarPtr(stmt.getLValue());
+
+                        addPFGEdge(pointerFlowGraph.getArrayIndex(o), lvarptr);
+                    }
+                    processCall(var, o);
+                }
+            }
+        }
     }
 
     /**
      * Propagates pointsToSet to pt(pointer) and its PFG successors,
      * returns the difference set of pointsToSet and pt(pointer).
      */
-    private PointsToSet propagate(Pointer pointer, PointsToSet pointsToSet) {
+    private PointsToSet propagate(Pointer n, PointsToSet pts) {
         // TODO - finish me
-        return null;
+
+        PointsToSet diff = new PointsToSet(pts);
+        diff.removeAll(n.getPointsToSet());
+
+        if (!diff.isEmpty()) {
+            n.getPointsToSet().addAll(diff);
+            for (Pointer target : pointerFlowGraph.getSuccsOf(n)) {
+                workList.addEntry(target, diff);
+            }
+        }
+
+        return diff;
     }
 
     /**
      * Processes instance calls when points-to set of the receiver variable changes.
      *
-     * @param var the variable that holds receiver objects
+     * @param var  the variable that holds receiver objects
      * @param recv a new discovered object pointed by the variable.
      */
     private void processCall(Var var, Obj recv) {
         // TODO - finish me
+        for (Invoke stmt : var.getInvokes()) {
+
+            JMethod method = resolveCallee(recv, stmt);
+
+            /// cover static & instance invoke?
+            Pointer varPtr = pointerFlowGraph.getVarPtr(method.getIR().getThis());
+            workList.addEntry(varPtr, new PointsToSet(recv));
+
+            Edge<Invoke, JMethod> edge = new Edge<>(getCallKind(stmt), stmt, method);
+            if (callGraph.addEdge(edge)) {
+                addReachable(method);
+                for (int idx = 0; idx < method.getParamCount(); ++idx) {
+                    Pointer source = pointerFlowGraph.getVarPtr(stmt.getInvokeExp().getArg(idx));
+                    Pointer target = pointerFlowGraph.getVarPtr(method.getIR().getParam(idx));
+                    addPFGEdge(source, target);
+                }
+
+                /// todo...
+                List<Var> methodRets = method.getIR().getReturnVars();
+                if (!methodRets.isEmpty()) {
+                    Var ret = stmt.getLValue();
+                    if (ret != null) {
+                        addPFGEdge(pointerFlowGraph.getVarPtr(methodRets.get(0)), pointerFlowGraph.getVarPtr(ret));
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -155,5 +337,21 @@ class Solver {
 
     CIPTAResult getResult() {
         return new CIPTAResult(pointerFlowGraph, callGraph);
+    }
+
+    private CallKind getCallKind(Invoke cs) {
+        if (cs.isSpecial()) {
+            return CallKind.SPECIAL;
+        } else if (cs.isStatic()) {
+            return CallKind.STATIC;
+        } else if (cs.isInterface()) {
+            return CallKind.INTERFACE;
+        } else if (cs.isVirtual()) {
+            return CallKind.VIRTUAL;
+        } else if (cs.isDynamic()) {
+            return CallKind.DYNAMIC;
+        } else {
+            return CallKind.OTHER;
+        }
     }
 }

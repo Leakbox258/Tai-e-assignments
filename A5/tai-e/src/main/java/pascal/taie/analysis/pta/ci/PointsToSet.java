@@ -51,6 +51,29 @@ class PointsToSet implements Iterable<Obj> {
     }
 
     /**
+     * Constructs a points-to set containing exist objs.
+     */
+    PointsToSet(PointsToSet pts) {
+        for(Obj obj : pts){
+            addObject(obj);
+        }
+    }
+
+    /**
+     * addAll
+     */
+    boolean addAll(PointsToSet pts) {
+        return set.addAll(pts.set);
+    }
+
+    /**
+     * removeAll
+     */
+    boolean removeAll(PointsToSet pts){
+        return set.removeAll(pts.set);
+    }
+
+    /**
      * Adds an object to this set.
      *
      * @return true if this points-to set changed as a result of the call,
