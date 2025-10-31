@@ -35,6 +35,9 @@ import pascal.taie.language.type.Type;
  *     <li>type: the type of the transferred taint object
  * </ul>
  */
+/// 0~...: method arguments
+/// -1: base
+/// -2: result
 record TaintTransfer(JMethod method, int from, int to, Type type) {
 
     /**

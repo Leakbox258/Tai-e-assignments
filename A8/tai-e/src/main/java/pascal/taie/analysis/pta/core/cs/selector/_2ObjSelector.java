@@ -29,6 +29,9 @@ import pascal.taie.analysis.pta.core.cs.element.CSMethod;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.analysis.pta.core.heap.Obj;
 import pascal.taie.language.classes.JMethod;
+import pascal.taie.util.AnalysisException;
+
+import java.util.List;
 
 /**
  * Implementation of 2-object sensitivity.
@@ -43,18 +46,33 @@ public class _2ObjSelector implements ContextSelector {
     @Override
     public Context selectContext(CSCallSite callSite, JMethod callee) {
         // TODO - finish me
-        return null;
+        return switch (callSite.getContext().getLength()) {
+            case 0 -> getEmptyContext();
+            case 1 -> ListContext.make(callSite.getContext().getElementAt(0));
+            case 2 -> ListContext.make(callSite.getContext().getElementAt(0), callSite.getContext().getElementAt(1));
+            default -> throw new AnalysisException("bad len for 2_");
+        };
     }
 
     @Override
     public Context selectContext(CSCallSite callSite, CSObj recv, JMethod callee) {
         // TODO - finish me
-        return null;
+        return switch (recv.getContext().getLength()) {
+            case 0 -> ListContext.make(recv.getObject());
+            case 1 -> ListContext.make(recv.getContext().getElementAt(0), recv.getObject());
+            case 2 -> ListContext.make(recv.getContext().getElementAt(1), recv.getObject());
+            default -> throw new AnalysisException("bad len for 2_");
+        };
     }
 
     @Override
     public Context selectHeapContext(CSMethod method, Obj obj) {
         // TODO - finish me
-        return null;
+        return switch (method.getContext().getLength()) {
+            case 0 -> getEmptyContext();
+            case 1 -> ListContext.make(method.getContext().getElementAt(0));
+            case 2 -> ListContext.make(method.getContext().getElementAt(1));
+            default -> throw new AnalysisException("bad len for 2_");
+        };
     }
 }
