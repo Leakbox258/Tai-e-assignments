@@ -49,7 +49,6 @@ import pascal.taie.analysis.pta.plugin.taint.TaintAnalysiss;
 import pascal.taie.analysis.pta.pts.PointsToSet;
 import pascal.taie.analysis.pta.pts.PointsToSetFactory;
 import pascal.taie.config.AnalysisOptions;
-import pascal.taie.ir.exp.InvokeExp;
 import pascal.taie.ir.exp.Var;
 import pascal.taie.ir.stmt.Copy;
 import pascal.taie.ir.stmt.Invoke;
@@ -64,7 +63,6 @@ import pascal.taie.language.classes.JMethod;
 import pascal.taie.language.type.Type;
 
 import java.util.List;
-import java.util.Set;
 
 public class Solver {
 
@@ -90,8 +88,10 @@ public class Solver {
 
     private PointerAnalysisResult result;
 
-    Solver(AnalysisOptions options, HeapModel heapModel,
-           ContextSelector contextSelector) {
+    public record TransferInstance(Invoke invoke, Context context, CSMethod csMethod, CSVar base) {
+    }
+
+    Solver(AnalysisOptions options, HeapModel heapModel, ContextSelector contextSelector) {
         this.options = options;
         this.heapModel = heapModel;
         this.contextSelector = contextSelector;
@@ -249,16 +249,18 @@ public class Solver {
             /// since taint object can be only made by source method
             /// sources are static, and can't be inter analysed
             if (taintAnalysis.isSource(method, resType)) {
-                CSVar csVar = csManager.getCSVar(context, stmt.getLValue());
+                CSVar csVar = csManager.getCSVar(context, stmt.getResult());
 
-                Obj rawTaintObj = taintAnalysis.makeTaint(stmt, resType);
-                Context newHeapContext = contextSelector.selectHeapContext(csMethod, rawTaintObj);
-                CSObj csTaintObj = csManager.getCSObj(newHeapContext, rawTaintObj);
+                if(csVar != null){
+                    Obj rawTaintObj = taintAnalysis.makeTaint(stmt, resType);
+                    Context newHeapContext = contextSelector.selectHeapContext(csMethod, rawTaintObj);
+                    CSObj csTaintObj = csManager.getCSObj(newHeapContext, rawTaintObj);
 
-                workList.addEntry(csVar, PointsToSetFactory.make(csTaintObj));
+                    workList.addEntry(csVar, PointsToSetFactory.make(csTaintObj));
+                }
             }
             /// transfer taint objs
-            taintAnalysis.processTransfer(stmt, context, csMethod);
+            taintAnalysis.processTransfer(new TransferInstance(stmt, context, csMethod, null));
             /// Taint Analysis end
 
             Edge<CSCallSite, CSMethod> edge = new Edge<>(getCallKind(stmt), csCallSite, csMethod);
@@ -282,7 +284,6 @@ public class Solver {
                     }
                 }
             }
-
             return null;
         }
     }
@@ -299,11 +300,16 @@ public class Solver {
         }
     }
 
-    /**
-     * Processes work-list entries until the work-list is empty.
-     */
-    private void analyze() {
-        // TODO - finish me
+    public void addTaintPFGEdge(Pointer source, Pointer target) {
+        if (taintPointerFlowGraph.addEdge(source, target)) {
+            if (!source.getPointsToSet().isEmpty()) {
+                /// only add taint objs
+                workList.addEntry(target, taintAnalysis.getTaintObjs(source.getPointsToSet()));
+            }
+        }
+    }
+
+    private void analysisImpl() {
         while (!workList.isEmpty()) {
             WorkList.Entry entry = workList.pollEntry();
             PointsToSet diff = propagate(entry.pointer(), entry.pointsToSet());
@@ -311,6 +317,7 @@ public class Solver {
             if (entry.pointer() instanceof CSVar csVar) {
                 Context context = csVar.getContext();
                 for (CSObj csObj : diff) {
+
                     for (LoadField stmt : csVar.getVar().getLoadFields()) {
                         CSVar csLVar = csManager.getCSVar(context, stmt.getLValue());
                         JField field = stmt.getFieldRef().resolve();
@@ -344,6 +351,14 @@ public class Solver {
     }
 
     /**
+     * Processes work-list entries until the work-list is empty.
+     */
+    private void analyze() {
+        // TODO - finish me
+        analysisImpl();
+    }
+
+    /**
      * Propagates pointsToSet to pt(pointer) and its PFG successors,
      * returns the difference set of pointsToSet and pt(pointer).
      */
@@ -358,10 +373,12 @@ public class Solver {
         });
 
         if (!diff.isEmpty()) {
-
             n.getPointsToSet().addAll(diff);
             for (Pointer s : pointerFlowGraph.getSuccsOf(n)) {
                 workList.addEntry(s, diff);
+            }
+            for (Pointer s : taintPointerFlowGraph.getSuccsOf(n)) {
+                workList.addEntry(s, taintAnalysis.getTaintObjs(diff));
             }
         }
 
@@ -378,7 +395,13 @@ public class Solver {
         // TODO - finish me
         Context context = recv.getContext();
         for (Invoke stmt : recv.getVar().getInvokes()) {
-            JMethod method = resolveCallee(recvObj, stmt);
+            JMethod method;
+            if(taintAnalysis.isTaint(recvObj)){
+                method = stmt.getMethodRef().resolve();
+            }else{
+                method = resolveCallee(recvObj, stmt);
+            }
+
             CSCallSite csCallSite = csManager.getCSCallSite(context, stmt);
             Context newContext = contextSelector.selectContext(csCallSite, recvObj, method);
             CSMethod csMethod = csManager.getCSMethod(newContext, method);
@@ -406,7 +429,7 @@ public class Solver {
                 }
             }
             /// taint Analysis
-            taintAnalysis.processTransfer(stmt, context, csMethod, recv);
+            taintAnalysis.processTransfer(new TransferInstance(stmt, context, csMethod, recv));
             taintAnalysis.checkSink(stmt, context, recv);
             /// taint obj transfer
         }
@@ -420,7 +443,7 @@ public class Solver {
      * @param callSite the call site to be resolved.
      * @return the resolved callee.
      */
-    private JMethod resolveCallee(CSObj recv, Invoke callSite) {
+    public JMethod resolveCallee(CSObj recv, Invoke callSite) {
         Type type = recv != null ? recv.getObject().getType() : null;
         return CallGraphs.resolveCallee(type, callSite);
     }

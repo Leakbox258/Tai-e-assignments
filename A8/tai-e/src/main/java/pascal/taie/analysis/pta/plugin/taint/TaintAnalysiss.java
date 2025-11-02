@@ -41,6 +41,7 @@ import pascal.taie.language.classes.JMethod;
 import pascal.taie.language.type.Type;
 
 import java.util.*;
+import java.util.List;
 import java.util.stream.Collectors;
 
 public class TaintAnalysiss {
@@ -86,6 +87,8 @@ public class TaintAnalysiss {
         // TODO - finish me
         // You could query pointer analysis results you need via variable result.
 
+//        Set<CSVar> taintCSVars = result.getCSVars().stream().filter(csVar -> hasTaint(csVar.getPointsToSet())).collect(Collectors.toSet());
+
         sinkInstances.forEach(sinkInstance -> {
             CSVar base = sinkInstance.csVar;
             Invoke stmt = sinkInstance.invoke;
@@ -93,21 +96,20 @@ public class TaintAnalysiss {
 
             sinkInstance.indexes.forEach(idx -> {
                 Set<Obj> pts = new HashSet<>();
-                if (idx == -1) { // base
+                if (idx == TaintTransfer.BASE) { // base
                     pts = result.getPointsToSet(base).stream().map(CSObj::getObject).collect(Collectors.toSet());
                 } else if (idx >= 0) {
-                    CSVar csArg = solver.getCSManager().getCSVar(context, stmt.getInvokeExp().getArg(idx));
+                    CSVar csArg = csManager.getCSVar(context, stmt.getInvokeExp().getArg(idx));
                     pts = result.getPointsToSet(csArg).stream().map(CSObj::getObject).collect(Collectors.toSet());
                 }
 
-                Set<Obj> taintObjs = getTaintObj(pts);
+                Set<Obj> taintObjs = getTaintObjs(pts);
 
                 if (hasTaint(pts)) {
                     taintObjs.forEach(obj -> {
                         taintFlows.add(new TaintFlow(manager.getSourceCall(obj), stmt, idx));
                     });
                 }
-
             });
         });
 
@@ -119,28 +121,27 @@ public class TaintAnalysiss {
         return config.getSources().contains(new Source(method, type));
     }
 
+    public boolean isTaint(CSObj csObj) {
+        return manager.isTaint(csObj.getObject());
+    }
+
+    public boolean isTaint(Obj obj) {
+        return manager.isTaint(obj);
+    }
+
     public Obj makeTaint(Invoke source, Type ty) {
         return manager.makeTaint(source, ty);
     }
 
-    public List<Integer> FromTransfer(JMethod method) {
-        List<Integer> list = new ArrayList<>();
-
-        config.getTransfers().forEach(trans -> {
-            if (trans.method() == method) {
-                list.add(trans.from());
-            }
-        });
-
-        return list;
+    private record FromTo(Integer from, Integer to) {
     }
 
-    public List<Integer> ToTransfer(JMethod method) {
-        List<Integer> list = new ArrayList<>();
+    private List<FromTo> FromToTransfer(JMethod method) {
+        List<FromTo> list = new LinkedList<>();
 
         config.getTransfers().forEach(trans -> {
             if (trans.method() == method) {
-                list.add(trans.to());
+                list.add(new FromTo(trans.from(), trans.to()));
             }
         });
 
@@ -155,126 +156,65 @@ public class TaintAnalysiss {
         return pts.stream().anyMatch(manager::isTaint);
     }
 
-    private Set<Obj> getTaintObj(Set<Obj> pts) {
+    public Set<Obj> getTaintObjs(Set<Obj> pts) {
         return pts.stream().filter(manager::isTaint).collect(Collectors.toSet());
     }
 
-    public void processTransfer(Invoke stmt, Context context, CSMethod csMethod) {
-        Var result = stmt.getResult();
-        List<Var> args = stmt.getInvokeExp().getArgs();
-        JMethod method = stmt.getMethodRef().resolve();
-
-        Set<CSObj> taintCSObjs = new HashSet<>();
-        boolean tainted = FromTransfer(method).stream().anyMatch(idx -> {
-            if (idx >= 0) {
-                /// arguments
-                CSVar csVar = csManager.getCSVar(context, args.get(idx));
-                if (hasTaint(csVar.getPointsToSet())) {
-                    Set<CSObj> taints = csVar.getPointsToSet().getObjects().stream().filter(csObj -> manager.isTaint(csObj.getObject())).collect(Collectors.toSet());
-                    taintCSObjs.addAll(taints);
-                    return true;
-                } else {
-                    return false;
-                }
-            } else if (idx == -1) {
-                /// static, cant be base
-                return false;
-            } else if (idx == -2) {
-                /// From cant be result
-                return false;
-            } else{
-                return false;
-            }
+    public PointsToSet getTaintObjs(PointsToSet pts) {
+        PointsToSet newPts = PointsToSetFactory.make();
+        pts.forEach(csObj -> {
+            if (manager.isTaint(csObj.getObject())) newPts.addObject(csObj);
         });
-
-        if (tainted) {
-            ToTransfer(method).forEach(idx -> {
-                CSVar csVar;
-                PointsToSet pts = PointsToSetFactory.make(); // ?
-                if (idx == -1) {
-                    /// static, cant be base
-                    csVar = null;
-                } else if (idx == -2) {
-                    /// if is -2, then result is always valid
-                    csVar = csManager.getCSVar(context, result);
-                } else {
-                    /// args?
-                    csVar = csManager.getCSVar(context, args.get(idx));
-                }
-                taintCSObjs.forEach(csObj -> {
-                    /// a new type
-                    Obj rawTaintObj = makeTaint(manager.getSourceCall(csObj.getObject()), csVar.getType());
-                    Context newHeapContext = solver.getContextSelector().selectHeapContext(csMethod, rawTaintObj);
-                    CSObj csTaintObj = csManager.getCSObj(newHeapContext, rawTaintObj);
-                    pts.addObject(csTaintObj);
-                });
-
-                solver.addWorkList(csVar, pts);
-            });
-        }
-
-//        return hasTaint;
+        return newPts;
     }
 
-    public void processTransfer(Invoke stmt, Context context, CSMethod csMethod, CSVar base) {
+    public void processTransfer(Solver.TransferInstance instance) {
+        Invoke invoke = instance.invoke();
+        Context context = instance.context();
+        CSMethod method = instance.csMethod();
+        CSVar csVar = instance.base();
+
+        processTransfer(invoke, context, method, csVar);
+    }
+
+    private void processTransfer(Invoke stmt, Context context, CSMethod csMethod, CSVar base) {
         Var result = stmt.getResult();
         List<Var> args = stmt.getInvokeExp().getArgs();
-        JMethod method = stmt.getMethodRef().resolve();
+        JMethod method = csMethod.getMethod();
 
-        Set<CSObj> taintCSObjs = new HashSet<>();
-        boolean tainted = FromTransfer(method).stream().anyMatch(idx -> {
-            if (idx >= 0) {
-                /// arguments
-                CSVar csVar = csManager.getCSVar(context, args.get(idx));
-                if (hasTaint(csVar.getPointsToSet())) {
-                    Set<CSObj> taints = csVar.getPointsToSet().getObjects().stream().filter(csObj -> manager.isTaint(csObj.getObject())).collect(Collectors.toSet());
-                    taintCSObjs.addAll(taints);
-                    return true;
-                } else {
-                    return false;
-                }
-            } else if (idx == -1) {
-                if (hasTaint(base.getPointsToSet())) {
-                    Set<CSObj> taints = base.getPointsToSet().getObjects().stream().filter(csObj -> manager.isTaint(csObj.getObject())).collect(Collectors.toSet());
-                    taintCSObjs.addAll(taints);
-                    return true;
-                } else {
-                    return false;
-                }
-            } else if (idx == -2) {
-                /// From cant be result
-                return false;
+        FromToTransfer(method).forEach(fromTo -> {
+            CSVar source = null, target = null;
+            if (fromTo.from >= 0 && fromTo.to == TaintTransfer.RESULT) {
+                /// arg-to-result
+                source = csManager.getCSVar(context, args.get(fromTo.from));
+                target = csManager.getCSVar(context, result);
+            } else if (fromTo.from >= 0 && fromTo.to == TaintTransfer.BASE) {
+                ///  arg-to-base
+                source = csManager.getCSVar(context, args.get(fromTo.from));
+                target = base;
+            } else if (fromTo.from == TaintTransfer.BASE && fromTo.to == TaintTransfer.RESULT) {
+                ///  base-to-result
+                source = base;
+                target = csManager.getCSVar(context, result);
             }
-            else{
-                return false;
-            }
-        });
 
-        if (tainted) {
-            ToTransfer(method).forEach(idx -> {
-                CSVar csVar;
-                PointsToSet pts = PointsToSetFactory.make();
-                if (idx == -1) {
-                    csVar = base;
-                } else if (idx == -2) {
-                    /// if is -2, then result is always valid
-                    csVar = csManager.getCSVar(context, result);
-                } else {
-                    /// args?
-                    csVar = csManager.getCSVar(context, args.get(idx));
-                }
-                taintCSObjs.forEach(csObj -> {
-                    Obj rawTaintObj = makeTaint(manager.getSourceCall(csObj.getObject()), csVar.getType());
-                    Context newHeapContext = solver.getContextSelector().selectHeapContext(csMethod, rawTaintObj);
-                    CSObj csTaintObj = csManager.getCSObj(newHeapContext, rawTaintObj);
-                    pts.addObject(csTaintObj);
+            if (source != null && target != null) {
+                solver.addTaintPFGEdge(source, target);
+                PointsToSet taintPts = getTaintObjs(source.getPointsToSet());
+                PointsToSet newPts = PointsToSetFactory.make();
+                Type ty = target.getType();
+                taintPts.forEach(taintObj -> {
+                    /// considering changeable type
+                    Obj rawTainObj = makeTaint(manager.getSourceCall(taintObj.getObject()), ty);
+                    Context heapContext = solver.getContextSelector().selectHeapContext(csMethod, rawTainObj);
+                    newPts.addObject(csManager.getCSObj(heapContext, rawTainObj));
                 });
 
-                solver.addWorkList(csVar, pts);
-            });
-        }
+                solver.addWorkList(target, newPts);
+            }
 
-//        return hasTaint;
+        });
+
     }
 
     public void checkSink(Invoke stmt, Context context) {

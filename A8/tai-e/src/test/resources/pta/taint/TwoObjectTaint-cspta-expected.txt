@@ -1,0 +1,3 @@
+Points-to sets of all variables
+TaintFlow{<TwoObjectTaint: void main(java.lang.String[])>[3@L8] temp$1 = invokestatic <SourceSink: java.lang.String source()>(); -> <TwoObjectTaint: void main(java.lang.String[])>[13@L13] invokestatic <SourceSink: void sink(java.lang.String)>(temp$5);/0}
+TaintFlow{<TwoObjectTaint: void main(java.lang.String[])>[8@L10] temp$3 = invokestatic <SourceSink: java.lang.String source()>(); -> <TwoObjectTaint: void main(java.lang.String[])>[17@L15] invokestatic <SourceSink: void sink(java.lang.String)>(temp$7);/0}
